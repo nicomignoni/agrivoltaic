@@ -32,6 +32,9 @@ def base_vertices(width, depth):
 def vertices(width, depth, center, planar_azimuth_vec, planar_tilt_vec):
     return R3(planar_azimuth_vec).T @ R1(planar_tilt_vec).T @ base_vertices(width, depth) + center
 
+def center(panel):
+    return np.array([[panel.pos_east], [panel.pos_north], [panel.height]])
+
 def light_beam(solar_azimuth_vec, solar_elevation_vec):
     return -R3(solar_azimuth_vec).T @ R1(solar_elevation_vec) @ e(1)
 

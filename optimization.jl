@@ -2,52 +2,15 @@ using Dates, LinearAlgebra, CSV, DataFrames, JuMP, MosekTools
 
 include("utils.jl")
 
-const EPSILON = 1e-4
+# Settings
 const S = 10
+const EPSILON = 1e-4
 const GAMMA = 0.01
 const ALBEDO = 0.1
 
-CROPS_FILE = "data/crops.csv"
-PANELS_FILE = "data/modules.csv"
-SOLAR_FILE = "data/solar.csv"
-
-# Shadow convex hull linear components
-function a(panel, crop, sun, vertex_index)
-  a1 = 0.5panel.width * panel.depth * [cos(sun.azimuth - panel.azimuth)/tan(sun.elevation), 1]
-    a21 =
-        cos(sun.azimuth) / tan(sun.elevation) * (panel.pos_east - crop.pos_east) +
-        sin(sun.azimuth) / tan(sun.elevation) * (crop.pos_north - panel.pos_north)
-    a22 =
-        cos(panel.azimuth) * (panel.pos_east - crop.pos_east) +
-        sin(panel.azimuth) * (crop.pos_north + panel.pos_north) -
-        panel.height * sin(sun.azimuth - panel.azimuth) / tan(sun.elevation)
-    return a1 + discrete_sin_wave(vertex_index-1) * panel.depth * [a21, a22]
-end
-
-function b(panel, crop, sun, vertex_index)
-    b1 = panel.height * cos(sun.azimuth - panel.azimuth) / tan(sun.elevation)
-    b2 =
-        sin(panel.azimuth) * (crop.pos_east - panel.pos_east) +
-        cos(panel.azimuth) * (crop.pos_north - panel.pos_north)
-    return panel.width * discrete_sin_wave(vertex_index) * (b1 + b2)
-end
-
-# Check whether a panel can shadow a crop, given the sun position
-function can_panel_shadow_crop(panel, crop, sun, num_points)
-    tilt_vec_samples =
-        stack(angle -> u(angle), range(start = -π / 2, stop = π / 2, length = num_points))
-
-    as = stack(j -> a(panel, crop, sun, j), 1:4)
-    bs = stack(j -> b(panel, crop, sun, j), 1:4)
-    shadowing_condition = as' * tilt_vec_samples .+ bs .>= 0
-
-    proj_incidence_condition = proj_incidence_vec(panel, sun)' * tilt_vec_samples .>= 0
-    return any(
-        stack(col -> all(col), eachcol(shadowing_condition)) .& proj_incidence_condition,
-    )
-end
-
-# ----------------------------------------------------------
+const CROPS_FILE = "data/crops.csv"
+const PANELS_FILE = "data/modules.csv"
+const SOLAR_FILE = "data/solar.csv"
 
 # Read data 
 print("Loading data... ")
@@ -61,7 +24,7 @@ println("Done")
 # each crop
 results = hcat(
     solar_data,
-    DataFrame(["planar_tilt_$i" => zeros(nrow(solar_data)) for i = 1:nrow(panels_data)]),
+    DataFrame(["planar_tilt_$(i)" => zeros(nrow(solar_data)) for i = 1:nrow(panels_data)]),
     DataFrame(["is_crop_$(k)_shadowed" => zeros(nrow(solar_data)) for k = 1:nrow(crops_data)])
  )
 
@@ -95,7 +58,7 @@ for (t, sun) in eachrow(solar_data) |> enumerate
     @constraint(
         prob,
         [(i, panel) in eachrow(panels_data) |> enumerate],
-        proj_incidence_vec(panel, sun)' * tilt_vec[i, :] >= 0
+        proj_incidence_condition(panel, sun, tilt_vec[i,:]) >= 0
     )
 
     num_modules_shadowing_crop = zeros(AffExpr, nrow(crops_data))
@@ -114,19 +77,13 @@ for (t, sun) in eachrow(solar_data) |> enumerate
         # Shadow indicators definitions' constraints
         for j = 1:4
             does_module_hp_shadow_crop[(i, j, k)] = @variable(prob, binary=true)
-
-            bj = b(panel, crop, sun, j)
-            aj = a(panel, crop, sun, j)
-
-            m_down = bj - aj' * sign.(aj)
-            m_up = bj + aj' * sign.(aj)
             @constraints(
                 prob,
                 begin
-                    bj - aj' * tilt_vec[i, :] <=
-                    m_up * (1 - does_module_hp_shadow_crop[(i, j, k)])
-                    bj - aj' * tilt_vec[i, :] >=
-                    EPSILON + (m_down - EPSILON) * does_module_hp_shadow_crop[(i, j, k)]
+                  - shadowing_condition(panel, crop, sun, j, tilt_vec[i,:]) <=
+                    big_M(panel, crop, sun, j) * (1 - does_module_hp_shadow_crop[(i, j, k)])
+                  - shadowing_condition(panel, crop, sun, j, tilt_vec[i,:]) >=
+                    EPSILON + (small_M(panel, crop, sun, j) - EPSILON) * does_module_hp_shadow_crop[(i, j, k)]
                 end
             )
         end
@@ -179,7 +136,7 @@ for (t, sun) in eachrow(solar_data) |> enumerate
 
     # Update results
     for (i, vec) in eachrow(tilt_vec) |> enumerate
-        results[t, "planar_tilt_$i"] = angle(vec) |> value
+      results[t, "planar_tilt_$(i)"] = angle(vec) |> value
     end
     for (k, status) in is_crop_shadowed |> enumerate
       results[t, "is_crop_$(k)_shadowed"] = round(status |> value)
