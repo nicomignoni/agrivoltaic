@@ -5,7 +5,6 @@ import pandas as pd
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import matplotlib.patches as patches
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 import utils as u
@@ -91,14 +90,14 @@ def update(t):
         panel_polygons.set_verts(updated_panel_vertices)
         shadow_polygons.set_verts(updated_panel_shadow)
 
-        # Update crops color (depending on shading statdepending on shading statee)
-        crops_color = [
-            COLOR_SHADOW_CROP 
-            if result[f"is_crop_{k+1}_shadowed"] == 1 
-            else COLOR_LIGHTING_CROP 
-            for k, _ in crops_data.iterrows()
-        ]
-        crops_plot.set_color(crops_color)
+    # Update crops color (depending on shading statdepending on shading state)
+    crops_color = [
+        COLOR_SHADOW_CROP 
+        if result[f"is_crop_{k+1}_shadowed"] == 1 
+        else COLOR_LIGHTING_CROP 
+        for k, _ in crops_data.iterrows()
+    ]
+    crops_plot.set_color(crops_color)
 
     return (panel_polygons, shadow_polygons, crops_plot)
 
