@@ -1,4 +1,4 @@
-using LinearAlgebra, BlockDiagonals, JuMP, MosekTools
+using LinearAlgebra, BlockDiagonals, JuMP, SCIP
 
 struct Panel
     width::Real
@@ -23,25 +23,37 @@ end
 
 # --------------------- Panel ---------------------
 
-panel_area(panel::Panel) = panel.width * panel.depth
+"""Panel's area"""
+A(panel::Panel) = panel.width * panel.depth
 
-panel_power(panel::Panel, sun::Sun, albedo::Real, tilt_vec) =
-    panel_area(panel) * (
+"""Panel's absorbed power"""
+p(panel::Panel, sun::Sun, albedo::Real, tilt_vec) =
+    A(panel) * (
         irr_normal(panel, sun, tilt_vec) +
         irr_diff(sun, tilt_vec) +
         irr_ground(sun, albedo, tilt_vec)
     )
 
-base_vertices(panel::Panel) = [
+"""
+Panel's vertices position when lying flat on the ground, 
+with the center corresponding to the origin.
+"""
+v₀(panel::Panel) = [
     -panel.width panel.width panel.width -panel.width
     -panel.depth -panel.depth panel.depth panel.depth
     0 0 0 0
 ]
 
-vertices(panel::Panel, tilt_vec) =
-    R₃(u(panel.azimuth))' * R₁(tilt_vec) * base_vertices(panel) .+ panel.pos
+raw"""Panel's vertices position in $\mathbb{R}^3$$"""
+v(panel::Panel, tilt_vec) = R₃(u(panel.azimuth))' * R₁(tilt_vec) * v₀(panel) .+ panel.pos
 
 # --------------------- Sun & Irradiance ---------------------
+
+# If the returned expression is nonnegative, the sun is hitting the panel
+# on the side there the PV cells are mounted, i.e., the direct irradiance
+# flux is nonnegative.
+proj_incidence_condition(panel::Panel, sun::Sun, tilt_vec) =
+    proj_incidence_vec(panel, sun)' * tilt_vec
 
 light_beam(sun::Sun) = -R₃(u(sun.azimuth))' * R₁(u(sun.elevation)) * e(2)
 
@@ -60,7 +72,7 @@ raw"Canonical bases in $\mathbf{R}^3$."
 e(i::Int) = I[1:3, i]
 
 raw"Trigonometric vector."
-u(angle::Real) = [sin(angle); cos(angle)]
+u(θ::Real) = [sin(θ); cos(θ)]
 
 raw"Angle represented by the trigonometric vector"
 angle(u::Vector) = atan(u[1] / u[2])
@@ -77,75 +89,80 @@ R₁(u::Vector) = BlockDiagonal([ones(1, 1), R₀(u)])
 raw"Rotation matrix in $\mathbf{R}^3$, around Up (i.e., Z) axis."
 R₃(u::Vector) = BlockDiagonal([R₀(u), ones(1, 1)])
 
-raw"""
-Panel vertices position when lying flat on the ground, 
-with the center corresponding to the origin.
-"""
-discrete_sin_wave(n::Int) = sin(π * n / 2)
+"""Discrete sine wave"""
+σ(n::Int) = sin(π * n / 2)
 
 # --------------------- Control problem ---------------------
 
-# Shadow convex hull linear components
+"""Shadow convex hull linear vector component"""
 function a(panel::Panel, crop::Crop, sun::Sun, vertex_index)
-    a1 =
+    a₁ =
         0.5panel.width *
         panel.depth *
         [cos(sun.azimuth - panel.azimuth) / tan(sun.elevation), 1]
-    a21 =
+    a₂₁ =
         cos(sun.azimuth) / tan(sun.elevation) * (panel.pos[1] - crop.pos[1]) +
         sin(sun.azimuth) / tan(sun.elevation) * (crop.pos[2] - panel.pos[2])
-    a22 =
+    a₂₂ =
         cos(panel.azimuth) * (panel.pos[1] - crop.pos[1]) +
         sin(panel.azimuth) * (crop.pos[2] + panel.pos[2]) -
         panel.pos[3] * sin(sun.azimuth - panel.azimuth) / tan(sun.elevation)
-    return a1 + discrete_sin_wave(vertex_index - 1) * panel.depth * [a21, a22]
+    return a₁ + σ(vertex_index - 1) * panel.depth * [a₂₁, a₂₂]
 end
 
-function b(panel, crop, sun, vertex_index)
-    b1 = panel.pos[3] * cos(sun.azimuth - panel.azimuth) / tan(sun.elevation)
-    b2 =
-        sin(panel.azimuth) * (crop.pos[1] - panel.pos[1]) +
-        cos(panel.azimuth) * (crop.pos[2] - panel.pos[2])
-    return panel.width * discrete_sin_wave(vertex_index) * (b1 + b2)
+"""Shadow convex hull linear scalar component"""
+function b(panel::Panel, crop::Crop, sun::Sun, vertex_index)
+    b₁ = panel.pos[3] * cos(sun.azimuth - panel.azimuth) / tan(sun.elevation)
+    b₂ = sin(panel.azimuth) * (crop.pos[1] - panel.pos[1]) +
+         cos(panel.azimuth) * (crop.pos[2] - panel.pos[2])
+    return panel.width * σ(vertex_index) * (b₁ + b₂)
 end
 
 # If the returned expression is nonnegative, the crop is inside the 
 # halfplane identified by the vertex_index
-shadowing_condition(panel, crop, sun, vertex_index, tilt_vec) =
+g(panel::Panel, crop::Crop, sun::Sun, vertex_index::Int, tilt_vec) =
     a(panel, crop, sun, vertex_index)' * tilt_vec + b(panel, crop, sun, vertex_index)
 
-# If the returned expression is nonnegative, the sun is hitting the panel
-# on the side there the PV cells are mounte, i.e., the direct irradiance 
-# flux is nonnegative.
-proj_incidence_condition(panel, sun, tilt_vec) = proj_incidence_vec(panel, sun)' * tilt_vec
+is_panel_shadowing_crop(panel::Panel, crop::Crop, sun::Sun, tilt_vec) =
+    all(j -> g(panel, crop, sun, j, tilt_vec) >= 0, 1:4)
 
-# Check (probabilistically) whether a panel can shadow a crop, 
+# Check (probabilistically) whether a panel can shadow a crop,
 # given the sun position
-can_panel_shadow_crop(panel, crop, sun, num_samples) = any(
-    angle -> (
-        all(j -> shadowing_condition(panel, crop, sun, j, u(angle)) >= 0, 1:4) &
-        (proj_incidence_condition(panel, sun, u(angle)) >= 0)
-    ),
-    range(start = -π / 2, stop = π / 2, length = num_samples),
-)
+function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::Int)
+    # Deterministic pruning
+    if (crop.pos .- panel.pos)' * light_beam(sun) <= 0
+        return false
+    else
+    # Probabilistic pruning
+        for angle in range(start = -π / 2, stop = π / 2, length = num_samples)
+            if (
+                is_panel_shadowing_crop(panel, crop, sun, u(angle)) &
+                (proj_incidence_condition(panel, sun, u(angle)) >= 0)
+            )
+                return true
+            end
+        end
+        return false
+    end
+end
 
 # big-M and small-M for logical to integer constraint
 # reformulation
-function big_M(panel, crop, sun, vertex_index)
+function big_M(panel::Panel, crop::Crop, sun::Sun, vertex_index::Int)
     _a = a(panel, crop, sun, vertex_index)
     return -b(panel, crop, sun, vertex_index) + _a' * sign.(_a)
 end
 
-function small_M(panel, crop, sun, vertex_index)
+function small_M(panel::Panel, crop::Crop, sun::Sun, vertex_index::Int)
     _a = a(panel, crop, sun, vertex_index)
     return -b(panel, crop, sun, vertex_index) - _a' * sign.(_a)
 end
 
 # Optimal control open-loop
-function control(sun, panels, crops, albedo, γ, num_samples=10, num_approx_points=6, ϵ=1e-4)
+function control(sun::Sun, panels, crops, albedo, γ, num_samples=100, num_approx_points=6, ϵ=1e-4)
     print("[Sun @ $(sun.time)] Start constructing problem... ")
-    prob = Model(MosekTools.Optimizer)
-    set_attribute(prob, "QUIET", true)
+    prob = Model(SCIP.Optimizer)
+    set_attribute(prob, "display/verblevel", 0)
 
     # Consider a pair (panel, crop) only if the panel can actually
     # shadow the crop
@@ -164,7 +181,7 @@ function control(sun, panels, crops, albedo, γ, num_samples=10, num_approx_poin
     if γ > 0
       # Relaxed form
       @constraint(prob, tilt_vec[:, 1] .^ 2 .+ tilt_vec[:, 2] .^ 2 .<= 1)
-    else 
+    else
       # SOS2 formulation
       approx_range = range(start=-π / 2, stop=π / 2, length=num_approx_points) 
       approx_points = [sin.(approx_range) cos.(approx_range)]
@@ -211,13 +228,11 @@ function control(sun, panels, crops, albedo, γ, num_samples=10, num_approx_poin
             @constraints(
                 prob,
                 begin
-                    -shadowing_condition(panel, crop, sun, j, tilt_vec[i, :]) <=
+                    -g(panel, crop, sun, j, tilt_vec[i, :]) <=
                     big_M(panel, crop, sun, j) *
                     (1 - does_module_hp_shadow_crop[(i, j, k)])
-                    -shadowing_condition(panel, crop, sun, j, tilt_vec[i, :]) >=
-                    epsilon +
-                    (small_M(panel, crop, sun, j) - epsilon) *
-                    does_module_hp_shadow_crop[(i, j, k)]
+                    -g(panel, crop, sun, j, tilt_vec[i, :]) >=
+                    ϵ + (small_M(panel, crop, sun, j) - ϵ) * does_module_hp_shadow_crop[(i, j, k)]
                 end
             )
         end
@@ -243,7 +258,7 @@ function control(sun, panels, crops, albedo, γ, num_samples=10, num_approx_poin
 
     # Objective function terms
     total_power = sum(
-        panel_power(panel, sun, albedo, tilt_vec[i, :]) for (i, panel) in enumerate(panels)
+        p(panel, sun, albedo, tilt_vec[i, :]) for (i, panel) in enumerate(panels)
     )
 
     # In JuMP, the l1 norm is explicitly defined throught the canonical cone formulation
