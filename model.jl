@@ -1,5 +1,8 @@
 using LinearAlgebra, BlockDiagonals, JuMP, SCIP
 
+const DEFAULT_NUM_SAMPLES = 100
+const DEFAULT_APPROX_POINTS = 6
+
 struct Panel
     width::Real
     depth::Real
@@ -60,7 +63,8 @@ light_beam(sun::Sun) = -R₃(u(sun.azimuth))' * R₁(u(sun.elevation)) * e(2)
 proj_incidence_vec(panel::Panel, sun::Sun) =
     [cos(sun.elevation) * cos(sun.azimuth - panel.azimuth), sin(sun.elevation)]
 
-irr_normal(panel::Panel, sun::Sun, tilt_vec) = sun.dni * proj_incidence_vec(panel, sun)' * tilt_vec
+irr_normal(panel::Panel, sun::Sun, tilt_vec) =
+    sun.dni * proj_incidence_vec(panel, sun)' * tilt_vec
 
 irr_diff(sun::Sun, tilt_vec) = 0.5sun.dni * (1 + tilt_vec[2])
 
@@ -113,8 +117,9 @@ end
 """Shadow convex hull linear scalar component"""
 function b(panel::Panel, crop::Crop, sun::Sun, vertex_index)
     b₁ = panel.pos[3] * cos(sun.azimuth - panel.azimuth) / tan(sun.elevation)
-    b₂ = sin(panel.azimuth) * (crop.pos[1] - panel.pos[1]) +
-         cos(panel.azimuth) * (crop.pos[2] - panel.pos[2])
+    b₂ =
+        sin(panel.azimuth) * (crop.pos[1] - panel.pos[1]) +
+        cos(panel.azimuth) * (crop.pos[2] - panel.pos[2])
     return panel.width * σ(vertex_index) * (b₁ + b₂)
 end
 
@@ -128,12 +133,12 @@ is_panel_shadowing_crop(panel::Panel, crop::Crop, sun::Sun, tilt_vec) =
 
 # Check (probabilistically) whether a panel can shadow a crop,
 # given the sun position
-function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::Int)
+function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::Int=DEFAULT_NUM_SAMPLES)
     # Deterministic pruning
     if (crop.pos .- panel.pos)' * light_beam(sun) <= 0
         return false
     else
-    # Probabilistic pruning
+        # Probabilistic pruning
         for angle in range(start = -π / 2, stop = π / 2, length = num_samples)
             if (
                 is_panel_shadowing_crop(panel, crop, sun, u(angle)) &
@@ -145,6 +150,13 @@ function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::
         return false
     end
 end
+
+# Consider a pair (panel, crop) only if the panel can actually
+# shadow the crop
+panel_crop_pairs(panels, crops, sun, num_samples=DEFAULT_NUM_SAMPLES) = [
+    ((i, panel), (k, crop)) for (i, panel) in enumerate(panels) for
+    (k, crop) in enumerate(crops) if can_panel_shadow_crop(panel, crop, sun, num_samples)
+]
 
 # big-M and small-M for logical to integer constraint
 # reformulation
@@ -159,17 +171,19 @@ function small_M(panel::Panel, crop::Crop, sun::Sun, vertex_index::Int)
 end
 
 # Optimal control open-loop
-function control(sun::Sun, panels, crops, albedo, γ, num_samples=100, num_approx_points=6, ϵ=1e-4)
+function control(
+    sun::Sun,
+    panels,
+    crops,
+    albedo,
+    γ,
+    num_samples = DEFAULT_NUM_SAMPLES,
+    num_approx_points = DEFAULT_APPROX_POINTS,
+    ϵ = 1e-4,
+)
     print("[Sun @ $(sun.time)] Start constructing problem... ")
     prob = Model(SCIP.Optimizer)
     set_attribute(prob, "display/verblevel", 0)
-
-    # Consider a pair (panel, crop) only if the panel can actually
-    # shadow the crop
-    panel_crop_pairs = [
-        (i, k) for (i, panel) in enumerate(panels) for (k, crop) in enumerate(crops) if
-        can_panel_shadow_crop(panel, crop, sun, num_samples)
-    ]
 
     # Planar tilt vector, with bounds
     @variable(prob, z - 2 <= tilt_vec[1:length(panels), z = 1:2] <= 1)
@@ -179,25 +193,25 @@ function control(sun::Sun, panels, crops, albedo, γ, num_samples=100, num_appro
 
     # Fundamental trigonometric equality constraint
     if γ > 0
-      # Relaxed form
-      @constraint(prob, tilt_vec[:, 1] .^ 2 .+ tilt_vec[:, 2] .^ 2 .<= 1)
+        # Relaxed form
+        @constraint(prob, tilt_vec[:, 1] .^ 2 .+ tilt_vec[:, 2] .^ 2 .<= 1)
     else
-      # SOS2 formulation
-      approx_range = range(start=-π / 2, stop=π / 2, length=num_approx_points) 
-      approx_points = [sin.(approx_range) cos.(approx_range)]
+        # SOS2 formulation
+        approx_range = range(start = -π / 2, stop = π / 2, length = num_approx_points)
+        approx_points = [sin.(approx_range) cos.(approx_range)]
 
-      @variable(prob, 0 <= sos2_weight[1:length(panels), 1:num_approx_points] <= 1) # SOS2 weight
-      @variable(prob, sos2_indicator[1:length(panels), 1:num_approx_points-1], Bin) # SOS2 indicator
+        @variable(prob, 0 <= sos2_weight[1:length(panels), 1:num_approx_points] <= 1) # SOS2 weight
+        @variable(prob, sos2_indicator[1:length(panels), 1:num_approx_points-1], Bin) # SOS2 indicator
 
-      @constraints(
-        prob,
-        begin
-          sum(sos2_weight, dims=2) .== 1
-          sum(sos2_indicator, dims=2) .== 1
-          sos2_weight[:,1:end-1] .+ sos2_weight[:,2:end] .>= sos2_indicator
-          tilt_vec .== sos2_weight * approx_points
-        end
-      )
+        @constraints(
+            prob,
+            begin
+                sum(sos2_weight, dims = 2) .== 1
+                sum(sos2_indicator, dims = 2) .== 1
+                sos2_weight[:, 1:end-1] .+ sos2_weight[:, 2:end] .>= sos2_indicator
+                tilt_vec .== sos2_weight * approx_points
+            end
+        )
     end
 
     # Avoid light to hit the back of the panel 
@@ -216,11 +230,9 @@ function control(sun::Sun, panels, crops, albedo, γ, num_samples=100, num_appro
     # Does the panel's halfplane shadows the crop position?
     does_module_hp_shadow_crop = Dict{NTuple{3,Int},VariableRef}()
 
-    for (i, k) in panel_crop_pairs
+    for ((i, panel), (k, crop)) in panel_crop_pairs(panels, crops, sun, num_samples)
         does_module_shadow_crop[(i, k)] = @variable(prob, binary = true)
         num_modules_shadowing_crop[k] += does_module_shadow_crop[(i, k)]
-
-        panel, crop = panels[i], crops[k]
 
         # Shadow indicators definitions' constraints
         for j = 1:4
@@ -232,7 +244,9 @@ function control(sun::Sun, panels, crops, albedo, γ, num_samples=100, num_appro
                     big_M(panel, crop, sun, j) *
                     (1 - does_module_hp_shadow_crop[(i, j, k)])
                     -g(panel, crop, sun, j, tilt_vec[i, :]) >=
-                    ϵ + (small_M(panel, crop, sun, j) - ϵ) * does_module_hp_shadow_crop[(i, j, k)]
+                    ϵ +
+                    (small_M(panel, crop, sun, j) - ϵ) *
+                    does_module_hp_shadow_crop[(i, j, k)]
                 end
             )
         end
@@ -257,9 +271,8 @@ function control(sun::Sun, panels, crops, albedo, γ, num_samples=100, num_appro
     end)
 
     # Objective function terms
-    total_power = sum(
-        p(panel, sun, albedo, tilt_vec[i, :]) for (i, panel) in enumerate(panels)
-    )
+    total_power =
+        sum(p(panel, sun, albedo, tilt_vec[i, :]) for (i, panel) in enumerate(panels))
 
     # In JuMP, the l1 norm is explicitly defined throught the canonical cone formulation
     shadow_reference = stack(crop.to_shadow for crop in crops)
