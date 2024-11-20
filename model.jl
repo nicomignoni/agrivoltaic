@@ -4,71 +4,25 @@ const DEFAULT_NUM_SAMPLES = 100
 const DEFAULT_APPROX_POINTS = 6
 
 struct Panel
-    width::Real
-    depth::Real
+    width
+    depth
     pos::Vector
-    azimuth::Real
+    azimuth
 end
 
 struct Crop
     pos::Vector
-    to_shadow::Bool
+    to_shadow
 end
 
 struct Sun
     time::String
-    dni::Real
-    dhi::Real
-    ghi::Real
-    azimuth::Real
-    elevation::Real
+    dni
+    dhi
+    ghi
+    azimuth
+    elevation
 end
-
-# --------------------- Panel ---------------------
-
-"""Panel's area"""
-A(panel::Panel) = panel.width * panel.depth
-
-"""Panel's absorbed power"""
-p(panel::Panel, sun::Sun, albedo::Real, tilt_vec) =
-    A(panel) * (
-        irr_normal(panel, sun, tilt_vec) +
-        irr_diff(sun, tilt_vec) +
-        irr_ground(sun, albedo, tilt_vec)
-    )
-
-"""
-Panel's vertices position when lying flat on the ground, 
-with the center corresponding to the origin.
-"""
-v₀(panel::Panel) = [
-    -panel.width panel.width panel.width -panel.width
-    -panel.depth -panel.depth panel.depth panel.depth
-    0 0 0 0
-]
-
-raw"""Panel's vertices position in $\mathbb{R}^3$$"""
-v(panel::Panel, tilt_vec) = R₃(u(panel.azimuth))' * R₁(tilt_vec) * v₀(panel) .+ panel.pos
-
-# --------------------- Sun & Irradiance ---------------------
-
-# If the returned expression is nonnegative, the sun is hitting the panel
-# on the side there the PV cells are mounted, i.e., the direct irradiance
-# flux is nonnegative.
-proj_incidence_condition(panel::Panel, sun::Sun, tilt_vec) =
-    proj_incidence_vec(panel, sun)' * tilt_vec
-
-light_beam(sun::Sun) = -R₃(u(sun.azimuth))' * R₁(u(sun.elevation)) * e(2)
-
-proj_incidence_vec(panel::Panel, sun::Sun) =
-    [cos(sun.elevation) * cos(sun.azimuth - panel.azimuth), sin(sun.elevation)]
-
-irr_normal(panel::Panel, sun::Sun, tilt_vec) =
-    sun.dni * proj_incidence_vec(panel, sun)' * tilt_vec
-
-irr_diff(sun::Sun, tilt_vec) = 0.5sun.dni * (1 + tilt_vec[2])
-
-irr_ground(sun::Sun, albedo::Real, tilt_vec) = 0.5albedo * sun.ghi * (1 - tilt_vec[2])
 
 # --------------------- Geometry --------------------
 
@@ -76,7 +30,7 @@ raw"Canonical bases in $\mathbf{R}^3$."
 e(i::Int) = I[1:3, i]
 
 raw"Trigonometric vector."
-u(θ::Real) = [sin(θ); cos(θ)]
+u(θ) = [sin(θ); cos(θ)]
 
 raw"Angle represented by the trigonometric vector"
 angle(u::Vector) = atan(u[1] / u[2])
@@ -93,8 +47,68 @@ R₁(u::Vector) = BlockDiagonal([ones(1, 1), R₀(u)])
 raw"Rotation matrix in $\mathbf{R}^3$, around Up (i.e., Z) axis."
 R₃(u::Vector) = BlockDiagonal([R₀(u), ones(1, 1)])
 
+# Aliases
+H₀ = R₀(u(π/2)) .|> round
+H₃ = R₃(u(π/2)) .|> round
+
 """Discrete sine wave"""
-σ(n::Int) = sin(π * n / 2)
+σ(n::Int) = sin(π * n / 2) |> round
+
+"""Shadow projection matrix"""
+function M(sun::Sun)
+    n = light_beam(sun::Sun)
+    return I - n*e(3)' ./ n[3] 
+end 
+
+# --------------------- Panel ---------------------
+
+"""Panel's area"""
+panel_area(panel::Panel) = panel.width * panel.depth
+
+"""Panel's absorbed power"""
+panel_power(panel::Panel, sun::Sun, albedo::Real, tilt_vec) =
+    panel_area(panel) * (
+        irr_normal(panel, sun, tilt_vec) +
+        irr_diff(sun, tilt_vec) +
+        irr_ground(sun, albedo, tilt_vec)
+    )
+
+"""
+Panel's vertices position when lying flat on the ground, 
+with the center corresponding to the origin.
+"""
+v₀(panel::Panel) = 0.5*[
+    -panel.width panel.width panel.width -panel.width
+    -panel.depth -panel.depth panel.depth panel.depth
+    0 0 0 0
+]
+
+raw"""Panel's vertices position in $\mathbb{R}^3$$"""
+v(panel::Panel, tilt_vec::Vector) = R₃(u(panel.azimuth))' * R₁(tilt_vec)' * v₀(panel) .+ panel.pos
+
+"""Shadow's vertices position"""
+s(panel::Panel, sun::Sun, tilt_vec::Vector) = M(sun) * v(panel, tilt_vec)
+
+# --------------------- Sun & Irradiance ---------------------
+
+light_beam(sun::Sun) = -R₃(u(sun.azimuth))' * R₁(u(sun.elevation)) * e(2)
+
+"""Projected incidence"""
+# If the returned expression is nonnegative, the sun is hitting the panel
+# on the side there the PV cells are mounted, i.e., the direct irradiance
+# flux is nonnegative.
+proj_incidence(panel::Panel, sun::Sun, tilt_vec::Vector) =
+    [cos(sun.elevation) * cos(sun.azimuth - panel.azimuth), sin(sun.elevation)]' * tilt_vec
+
+"""Direct normal components"""
+irr_normal(panel::Panel, sun::Sun, tilt_vec::Vector) =
+    sun.dni * proj_incidence(panel, sun, tilt_vec)
+
+"""Diffuse horizontal component"""
+irr_diff(sun::Sun, tilt_vec::Vector) = 0.5sun.dni * (1 + tilt_vec[2])
+
+"""Ground reflected irradiance component"""
+irr_ground(sun::Sun, albedo::Real, tilt_vec::Vector) = 0.5albedo * sun.ghi * (1 - tilt_vec[2])
 
 # --------------------- Control problem ---------------------
 
@@ -109,7 +123,7 @@ function a(panel::Panel, crop::Crop, sun::Sun, vertex_index)
         sin(sun.azimuth) / tan(sun.elevation) * (crop.pos[2] - panel.pos[2])
     a₂₂ =
         cos(panel.azimuth) * (panel.pos[1] - crop.pos[1]) +
-        sin(panel.azimuth) * (crop.pos[2] + panel.pos[2]) -
+        sin(panel.azimuth) * (crop.pos[2] - panel.pos[2]) -
         panel.pos[3] * sin(sun.azimuth - panel.azimuth) / tan(sun.elevation)
     return a₁ + σ(vertex_index - 1) * panel.depth * [a₂₁, a₂₂]
 end
@@ -125,11 +139,17 @@ end
 
 # If the returned expression is nonnegative, the crop is inside the 
 # halfplane identified by the vertex_index
-g(panel::Panel, crop::Crop, sun::Sun, vertex_index::Int, tilt_vec) =
+g(panel::Panel, crop::Crop, sun::Sun, vertex_index::Int, tilt_vec::Vector) =
     a(panel, crop, sun, vertex_index)' * tilt_vec + b(panel, crop, sun, vertex_index)
 
-is_panel_shadowing_crop(panel::Panel, crop::Crop, sun::Sun, tilt_vec) =
+is_panel_shadowing_crop(panel::Panel, crop::Crop, sun::Sun, tilt_vec::Vector) =
     all(j -> g(panel, crop, sun, j, tilt_vec) >= 0, 1:4)
+
+f_is_crop_shadowed(panels, crop, sun, tilt_vecs) = 
+    any(
+        is_panel_shadowing_crop(panel, crop, sun, tilt_vec) 
+        for (panel, tilt_vec) in  zip(panels, tilt_vecs)
+    )
 
 # Check (probabilistically) whether a panel can shadow a crop,
 # given the sun position
@@ -142,7 +162,7 @@ function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::
         for angle in range(start = -π / 2, stop = π / 2, length = num_samples)
             if (
                 is_panel_shadowing_crop(panel, crop, sun, u(angle)) &
-                (proj_incidence_condition(panel, sun, u(angle)) >= 0)
+                (proj_incidence(panel, sun, u(angle)) >= 0)
             )
                 return true
             end
@@ -153,7 +173,7 @@ end
 
 # Consider a pair (panel, crop) only if the panel can actually
 # shadow the crop
-panel_crop_pairs(panels, crops, sun, num_samples=DEFAULT_NUM_SAMPLES) = [
+panel_crop_pairs(panels, crops, sun::Sun, num_samples=DEFAULT_NUM_SAMPLES) = [
     ((i, panel), (k, crop)) for (i, panel) in enumerate(panels) for
     (k, crop) in enumerate(crops) if can_panel_shadow_crop(panel, crop, sun, num_samples)
 ]
@@ -175,11 +195,11 @@ function control(
     sun::Sun,
     panels,
     crops,
-    albedo,
-    γ,
-    num_samples = DEFAULT_NUM_SAMPLES,
-    num_approx_points = DEFAULT_APPROX_POINTS,
-    ϵ = 1e-4,
+    albedo::Real,
+    γ::Real,
+    num_samples::Int = DEFAULT_NUM_SAMPLES,
+    num_approx_points::Int = DEFAULT_APPROX_POINTS,
+    ϵ::Real = 1e-4,
 )
     print("[Sun @ $(sun.time)] Start constructing problem... ")
     prob = Model(SCIP.Optimizer)
@@ -219,7 +239,7 @@ function control(
     @constraint(
         prob,
         [(i, panel) in enumerate(panels)],
-        proj_incidence_condition(panel, sun, tilt_vec[i, :]) >= 0
+        proj_incidence(panel, sun, tilt_vec[i, :]) >= 0
     )
 
     num_modules_shadowing_crop = zeros(AffExpr, length(crops))
@@ -272,7 +292,7 @@ function control(
 
     # Objective function terms
     total_power =
-        sum(p(panel, sun, albedo, tilt_vec[i, :]) for (i, panel) in enumerate(panels))
+        sum(panel_power(panel, sun, albedo, tilt_vec[i, :]) for (i, panel) in enumerate(panels))
 
     # In JuMP, the l1 norm is explicitly defined throught the canonical cone formulation
     shadow_reference = stack(crop.to_shadow for crop in crops)

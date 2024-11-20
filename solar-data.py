@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pvlib as pv
 
-LAT, LON, ALT = 41.11714, 16.871871, 5 # Bari 
+LAT, LON, ALT = 40.6902033, 16.7484484, 181 # Laterza 
 START_DATE = "10-26-2024 00:00:00" # MM-DD-YYYY HH:MM:SS"
 END_DATE = "10-27-2024 00:00:00"
 FREQ = "15min"
