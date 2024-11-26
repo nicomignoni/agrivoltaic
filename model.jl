@@ -1,6 +1,9 @@
+using Dates: DateTime, @dateformat_str
+using CSV, DataFrames
 using LinearAlgebra, BlockDiagonals, JuMP, SCIP
+using ThreadsX
 
-const DEFAULT_NUM_SAMPLES = 100
+const DEFAULT_NUM_SAMPLES = 21 # 0.95 confidence
 const DEFAULT_APPROX_POINTS = 6
 
 struct Panel
@@ -170,13 +173,28 @@ function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::
         return false
     end
 end
+#= function can_panel_shadow_crop(panel::Panel, crop::Crop, sun::Sun, num_samples::Int=DEFAULT_NUM_SAMPLES) =#
+#=     # Deterministic pruning =#
+#=     if (crop.pos .- panel.pos)' * light_beam(sun) <= 0 =#
+#=         return false =#
+#=     else =#
+#=         # Probabilistic pruning =#
+#=         any( =#
+#=             is_panel_shadowing_crop(panel, crop, sun, u(angle)) & =#
+#=             (proj_incidence(panel, sun, u(angle)) >= 0) =#
+#=             Threads.@threads for angle in range(start = -π / 2, stop = π / 2, length = num_samples) =#
+#=         ) =#
+#=     end =#
+#= end =#
+
 
 # Consider a pair (panel, crop) only if the panel can actually
 # shadow the crop
-panel_crop_pairs(panels, crops, sun::Sun, num_samples=DEFAULT_NUM_SAMPLES) = [
-    ((i, panel), (k, crop)) for (i, panel) in enumerate(panels) for
-    (k, crop) in enumerate(crops) if can_panel_shadow_crop(panel, crop, sun, num_samples)
-]
+panel_crop_pairs(panels, crops, sun::Sun, num_samples=DEFAULT_NUM_SAMPLES) = 
+    ThreadsX.collect(
+        ((i, panel), (k, crop)) for (i, panel) in enumerate(panels) for
+        (k, crop) in enumerate(crops) if can_panel_shadow_crop(panel, crop, sun, num_samples)
+)
 
 # big-M and small-M for logical to integer constraint
 # reformulation
@@ -311,3 +329,40 @@ function control(
 
     return value.(tilt_vec), value.(is_crop_shadowed)
 end
+
+# --------------------- General utilities --------------------
+
+"""Get panels', crops', and solar's data"""
+function problem_data(
+    panels_data_path::String, 
+    crops_data_path::String, 
+    solar_data_path::String, 
+    verbose=true
+)
+    print("Loading data... ")
+    crops = [
+      Crop([crop.pos_east, crop.pos_north, crop.height], crop.to_shadow) 
+      for crop in CSV.read(crops_data_path, DataFrame) |> eachrow
+    ]
+    
+    panels = [
+      Panel(
+        panel.width, 
+        panel.depth, 
+        [panel.pos_east, panel.pos_north, panel.height],
+        panel.azimuth
+      )
+      for panel in CSV.read(panels_data_path, DataFrame) |> eachrow
+    ]
+    
+    suns = [
+      Sun(sun.time, sun.dni, sun.dhi, sun.ghi, sun.azimuth, sun.elevation)
+      for sun in CSV.read(solar_data_path, DataFrame) |> eachrow
+    ]
+
+    times = DateTime.([sun.time for sun in suns], dateformat"yyyy-mm-dd HH:MM:SS")
+    println("Done")
+
+    return panels, crops, suns, times
+end
+
