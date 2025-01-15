@@ -1,7 +1,6 @@
 using Dates: DateTime, @dateformat_str
 using CSV, DataFrames
 using LinearAlgebra, BlockDiagonals, JuMP, SCIP
-using ThreadsX
 
 const DEFAULT_NUM_SAMPLES = 21 # 0.95 confidence
 const DEFAULT_APPROX_POINTS = 6
@@ -101,7 +100,7 @@ light_beam(sun::Sun) = -R₃(u(sun.azimuth))' * R₁(u(sun.elevation)) * e(2)
 # on the side there the PV cells are mounted, i.e., the direct irradiance
 # flux is nonnegative.
 proj_incidence(panel::Panel, sun::Sun, tilt_vec::Vector) =
-    [cos(sun.elevation) * cos(sun.azimuth - panel.azimuth), sin(sun.elevation)]' * tilt_vec
+    cos(sun.elevation) * cos(sun.azimuth - panel.azimuth) * tilt_vec[1] + sin(sun.elevation) * tilt_vec[2]
 
 """Direct normal components"""
 irr_normal(panel::Panel, sun::Sun, tilt_vec::Vector) =
@@ -190,10 +189,11 @@ end
 
 # Consider a pair (panel, crop) only if the panel can actually
 # shadow the crop
-panel_crop_pairs(panels, crops, sun::Sun, num_samples=DEFAULT_NUM_SAMPLES) = 
-    ThreadsX.collect(
-        ((i, panel), (k, crop)) for (i, panel) in enumerate(panels) for
-        (k, crop) in enumerate(crops) if can_panel_shadow_crop(panel, crop, sun, num_samples)
+panel_crop_pairs(panels, crops, sun::Sun, num_samples=DEFAULT_NUM_SAMPLES) = (
+    ((i, panel), (k, crop)) 
+    for (i, panel) in enumerate(panels) 
+    for (k, crop) in enumerate(crops) 
+    if can_panel_shadow_crop(panel, crop, sun, num_samples)
 )
 
 # big-M and small-M for logical to integer constraint
@@ -218,10 +218,13 @@ function control(
     num_samples::Int = DEFAULT_NUM_SAMPLES,
     num_approx_points::Int = DEFAULT_APPROX_POINTS,
     ϵ::Real = 1e-4,
+    verbose::Bool = true
 )
-    print("[Sun @ $(sun.time)] Start constructing problem... ")
+    println("[Sun @ $(sun.time)] Start constructing problem... ")
     prob = Model(SCIP.Optimizer)
-    set_attribute(prob, "display/verblevel", 0)
+    if ~verbose
+        set_attribute(prob, "display/verblevel", 0)
+    end
 
     # Planar tilt vector, with bounds
     @variable(prob, z - 2 <= tilt_vec[1:length(panels), z = 1:2] <= 1)

@@ -7,8 +7,8 @@ const GAMMA = 1
 const ALBEDO = 0.01
 
 # Data paths
-const CROPS_FILE = "data/simple-plant/crops.csv"
-const PANELS_FILE = "data/simple-plant/modules.csv"
+const CROPS_FILE = "data/la-svolta-plant/crops.csv"
+const PANELS_FILE = "data/la-svolta-plant/modules.csv"
 const SOLAR_FILE = "data/solar.csv"
 
 # PyPlot settings
@@ -49,7 +49,8 @@ classical_policy_total_power = Vector{Real}(undef, length(suns))
 classical_policy_light_coverage = Vector{Real}(undef, length(suns))
 
 crops_reference = [crop.to_shadow for crop in crops]
-ThreadsX.foreach(enumerate(suns)) do (t, sun)
+#= ThreadsX.foreach(enumerate(suns)) do (t, sun) =#
+for (t, sun) in enumerate(suns)
     # Optimal control policy
     optimal_tilt_vecs[t,:,:], is_crop_shadowed = control(sun, panels, crops, ALBEDO, GAMMA)
     optimal_total_power[t] = sum(panel_power(panel, sun, ALBEDO, optimal_tilt_vecs[t,i,:]) for (i, panel) in enumerate(panels))
